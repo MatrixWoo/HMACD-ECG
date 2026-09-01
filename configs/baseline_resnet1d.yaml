@@ -1,0 +1,18 @@
+data:
+  ptbxl_path: /home/wuzuoxu/Data/ECG/1.0.3/
+  sampling_rate: 100        # 用 100 Hz
+  segment_length: 1000       # 10 秒
+
+model:
+  backbone: resnet1d
+  in_channels: 12
+  num_classes: 5
+
+training:
+  batch_size: 64
+  lr: 0.001
+  epochs: 50
+  seed: 42
+  patience: 15       # early stopping: stop if val AUROC doesn't improve for N epochs
+  lr_patience: 7     # ReduceLROnPlateau: halve LR if no improvement for N epochs
+  lr_factor: 0.5

@@ -1,0 +1,21 @@
+data:
+  ptbxl_path: /home/wuzuoxu/Data/ECG/1.0.3/
+  sampling_rate: 100
+  segment_length: 1000
+
+model:
+  backbone: resnet1d
+  in_channels: 12
+  num_classes: 5
+  num_concepts: 32
+
+training:
+  batch_size: 64
+  lr: 0.001
+  epochs: 50
+  seed: 42
+  patience: 15
+  lr_patience: 7
+  lr_factor: 0.5
+  lambda_compact: 0.1      # weight for concept compactness loss
+  lambda_diverse: 0.05     # weight for prototype diversity loss

@@ -1,0 +1,15 @@
+data/
+/datasets/
+results/*.pt
+results/*.pth
+*.pt
+*.pth
+*.ckpt
+*.npy
+*.npz
+*.log
+__pycache__/
+.ipynb_checkpoints/
+.env
+.git-mujoco-backup/
+.DS_Store
