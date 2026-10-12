@@ -20,6 +20,35 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def build_pos_mask(arm, K, L, arm_positions=8, segment_m=4):
+    """Build the evidence-span mask [K, L] for a given arm.
+
+    arm="global"  → None (all positions allowed; historical behavior)
+    arm="scatter" → every concept pools over the same `arm_positions`
+                    positions, spread evenly across [0, L). Control arm:
+                    same candidate count as "segment", no temporal grouping.
+    arm="segment" → concept k belongs to segment k // (K / segment_m) and
+                    may pool only over that segment's contiguous positions.
+    """
+    if arm == "global":
+        return None
+    mask = torch.zeros(K, L, dtype=torch.bool)
+    if arm == "scatter":
+        idx = [int(round(i * (L - 1) / (arm_positions - 1)))
+               for i in range(arm_positions)] if arm_positions > 1 else [L // 2]
+        mask[:, idx] = True
+    elif arm == "segment":
+        per_seg = K // segment_m
+        seg_len = L // segment_m
+        for k in range(K):
+            seg = k // per_seg
+            mask[k, seg * seg_len:(seg + 1) * seg_len] = True
+    else:
+        raise ValueError(f"unknown arm: {arm}")
+    assert mask.any(dim=1).all(), f"arm={arm}: some concept has no allowed position"
+    return mask
+
+
 class ConceptBank(nn.Module):
     """
     Model-discovered concept bank with K learnable prototypes.
@@ -44,6 +73,24 @@ class ConceptBank(nn.Module):
         # ---- concept → class classifier ----
         self.classifier = nn.Linear(num_concepts, num_classes)
 
+        # ---- position mask: which positions a concept may pool over ----
+        # Not registered at init: set via set_pos_mask() from the training
+        # script. Absence (getattr default None) = all L positions allowed,
+        # the historical global-arm behavior. Keeping it out of state_dict
+        # until set means old checkpoints load unchanged.
+
+    def set_pos_mask(self, mask):
+        """Restrict concept k's evidence to positions where mask[k, :] == 1.
+
+        mask: bool tensor [K, L]. Every row must have at least one True.
+        Registered as a buffer so it moves with .to(device) and DataParallel.
+        """
+        assert mask.dim() == 2 and mask.shape[0] == self.num_concepts, (
+            f"pos_mask must be [{self.num_concepts}, L], got {mask.shape}"
+        )
+        assert mask.any(dim=1).all(), "every concept needs >=1 allowed position"
+        self.register_buffer("pos_mask", mask)
+
     def forward(self, features):
         """
         Args:
@@ -62,6 +109,11 @@ class ConceptBank(nn.Module):
 
         # similarity map: for each (batch, prototype, position)
         sim = torch.einsum('bcl,kc->bkl', h_norm, p_norm)  # [B, K, L]
+
+        # ---- restrict evidence span (arm-specific position mask) ----
+        pos_mask = getattr(self, "pos_mask", None)
+        if pos_mask is not None:
+            sim = sim.masked_fill(~pos_mask.unsqueeze(0), float("-inf"))
 
         # ---- z_k = max over spatial positions ----
         z, _ = sim.max(dim=-1)  # [B, K]
@@ -108,21 +160,56 @@ class ConceptBank(nn.Module):
         return self.classifier(z)
 
 
-def concept_losses(logits, y, sim, prototypes,
-                   lambda_compact=0.1, lambda_diverse=0.05):
+def decorrelation_loss(z, eps=1e-8):
+    """Batch-wise pairwise mean squared correlation of concept activations.
+
+        L_dec = 1/(K(K-1)) * sum_{i != j} C_ij^2,
+        C = sample correlation matrix of z over the batch.
+
+    Penalizes positive AND negative correlations equally; the diagonal is
+    excluded (identically 1). Normalized by K(K-1), matching the L_div
+    convention, so the weight is per-pair in both families (same lambda still
+    does NOT mean same strength -- see the proposal §7.1).
+
+    Known degeneracy: a (near-)constant concept has undefined correlations;
+    with `eps` they evaluate to ~0, which *reduces* the loss. The loss itself
+    cannot fix this -- the validity gate (activation_validity_gate) must catch
+    it, exactly as for the other redundancy criteria.
+
+    Args:
+        z: [B, K] concept activations within one batch
+
+    Returns:
+        scalar loss, differentiable w.r.t. z
+    """
+    B, K = z.shape
+    if K < 2:
+        return z.new_zeros(())
+    zc = z - z.mean(dim=0, keepdim=True)                        # [B, K]
+    cov = (zc.t() @ zc) / max(B - 1, 1)                         # [K, K] sample cov
+    std = zc.std(dim=0, unbiased=(B > 1)) + eps                 # [K]
+    corr = cov / (std[:, None] * std[None, :])                  # [K, K]
+    off = corr[~torch.eye(K, dtype=torch.bool, device=z.device)]
+    return (off ** 2).mean()
+
+
+def concept_losses(logits, y, z, sim, prototypes,
+                   lambda_compact=0.1, lambda_diverse=0.05, lambda_decor=0.0):
     """
     Compute concept-related auxiliary losses.
 
     Args:
         logits:          [B, num_classes]
         y:               [B, num_classes] ground-truth labels
-        sim:             [B, K, L]          similarity map
-        prototypes:      [K, C]             concept prototypes
+        z:               [B, K]           concept activations (decorrelation)
+        sim:             [B, K, L]        similarity map
+        prototypes:      [K, C]           concept prototypes
         lambda_compact:  weight for compactness loss
         lambda_diverse:  weight for diversity loss
+        lambda_decor:    weight for activation decorrelation loss (0 = off)
 
     Returns:
-        total_loss:  scalar = cls_loss + λ_c*compactness + λ_d*diversity
+        total_loss:  scalar = cls + λ_c*compactness + λ_d*diversity + λ_dec*decorrelation
         loss_dict:   dict with individual loss values
     """
     # ---- classification loss ----
@@ -138,7 +225,16 @@ def concept_losses(logits, y, sim, prototypes,
     # ---- diversity loss: encourage distinct prototypes ----
     diversity = compute_prototype_diversity(prototypes)
 
+    # ---- decorrelation loss: penalize correlated activations ----
+    decorrelation = None
+    if lambda_decor > 0:
+        if z is None:
+            raise ValueError("lambda_decor > 0 requires z (concept activations)")
+        decorrelation = decorrelation_loss(z)
+
     total_loss = cls_loss + lambda_compact * compactness + lambda_diverse * diversity
+    if decorrelation is not None:
+        total_loss = total_loss + lambda_decor * decorrelation
 
     loss_dict = {
         "cls_loss": cls_loss.item(),
@@ -146,6 +242,8 @@ def concept_losses(logits, y, sim, prototypes,
         "diversity": diversity.item(),
         "total": total_loss.item(),
     }
+    if decorrelation is not None:
+        loss_dict["decorrelation"] = decorrelation.item()
     return total_loss, loss_dict
 
 
@@ -188,15 +286,17 @@ class HMACDModel(nn.Module):
             num_classes=num_classes,
         )
 
-    def forward(self, x, intervene_concepts=None):
+    def forward(self, x, intervene_concepts=None, return_features=False):
         """
         Args:
             x: [B, 12, T]
             intervene_concepts: optional list of concept indices to suppress
+            return_features: also return backbone spatial features [B, C, L]
         Returns:
             logits: [B, num_classes]
             z:      [B, K]            concept activations
             sim:    [B, K, L]         similarity map
+            features: [B, C, L]       (only if return_features=True)
         """
         features, _ = self.backbone(x, return_features=True)
         logits, z, sim = self.concept_bank(features)
@@ -205,6 +305,8 @@ class HMACDModel(nn.Module):
             z = self.concept_bank.intervene(z, intervene_concepts)
             logits = self.concept_bank.classify_from_z(z)
 
+        if return_features:
+            return logits, z, sim, features
         return logits, z, sim
 
     def get_prototypes(self):
