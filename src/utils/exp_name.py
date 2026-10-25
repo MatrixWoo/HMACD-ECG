@@ -48,5 +48,10 @@ def experiment_name(config):
         name += f"_sc{int(model.get('arm_positions', 8))}"
     elif arm == "segment":
         name += f"_sg{int(model.get('segment_m', 4))}"
+    # concept-bank attachment layer: `_l2`/`_l3`; layer4 (default) adds
+    # nothing so historical checkpoints keep their names.
+    attach = model.get("attach_layer", "layer4")
+    if attach != "layer4":
+        name += f"_{attach.replace('layer', 'l')}"
     name += f"_seed{int(train.get('seed', 42))}"
     return name

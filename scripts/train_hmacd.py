@@ -231,8 +231,10 @@ def main():
         in_channels=config["model"]["in_channels"],
         num_classes=config["model"]["num_classes"],
     )
+    attach_layer = config["model"].get("attach_layer", "layer4")
     model = HMACDModel(backbone, num_concepts=num_concepts,
-                       num_classes=config["model"]["num_classes"])
+                       num_classes=config["model"]["num_classes"],
+                       attach_layer=attach_layer)
     model = model.to(main_device)
 
     # ---- evidence-span arm (Step 2 of the temporal-granularity line) ----

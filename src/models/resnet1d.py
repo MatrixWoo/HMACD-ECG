@@ -95,33 +95,52 @@ class ResNet1D(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, x, return_features=False):
+    # feature map facts per layer (10s @100Hz input): channels, stride, RF in
+    # input samples — see scripts/receptive_field.py for the RF derivation.
+    LAYER_FACTS = {
+        "layer1": {"channels": 64,  "stride": 4,  "rf": 43},
+        "layer2": {"channels": 128, "stride": 8,  "rf": 99},
+        "layer3": {"channels": 256, "stride": 16, "rf": 211},
+        "layer4": {"channels": 512, "stride": 32, "rf": 435},
+    }
+
+    def forward(self, x, return_features=False, attach_layer="layer4"):
         """
         Args:
             x: [B, in_channels, time_steps]
             return_features: if True, also return spatial features before pool+fc
+            attach_layer: which layer's feature map to return when
+                return_features=True ("layer1".."layer4"). The pool+fc head
+                always runs on layer4; the concept bank may attach earlier.
         Returns:
             if return_features=False:
                 logits: [B, num_classes]
             if return_features=True:
                 (features, logits)
-                  features: [B, 512, L]  — spatial feature map for concept bank
-                  logits:   [B, num_classes]
+                  features: [B, C_layer, L_layer]  — for the attached layer
+                  logits:   [B, num_classes]       — layer4 head (unused by HMACD)
         """
+        feats = {}
         out = self.stem(x)
         out = self.layer1(out)
+        feats["layer1"] = out
         out = self.layer2(out)
+        feats["layer2"] = out
         out = self.layer3(out)
-        out = self.layer4(out)        # [B, 512, L]
-        features = out                 # spatial features for concept bank
+        feats["layer3"] = out
+        out = self.layer4(out)
+        feats["layer4"] = out
 
-        out = self.pool(out)          # [B, 512, 1]
-        out = out.squeeze(-1)         # [B, 512]
-        out = self.fc(out)            # [B, num_classes]
+        head_in = self.pool(out)          # [B, 512, 1]
+        head_in = head_in.squeeze(-1)     # [B, 512]
+        logits = self.fc(head_in)         # [B, num_classes]
 
         if return_features:
-            return features, out
-        return out
+            if attach_layer not in feats:
+                raise ValueError(f"unknown attach_layer {attach_layer}; "
+                                 f"expected one of {list(feats)}")
+            return feats[attach_layer], logits
+        return logits
 
 
 if __name__ == "__main__":

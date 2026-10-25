@@ -277,11 +277,15 @@ class HMACDModel(nn.Module):
     Supports concept intervention and per-concept analysis.
     """
 
-    def __init__(self, backbone, num_concepts=32, num_classes=5):
+    def __init__(self, backbone, num_concepts=32, num_classes=5,
+                 attach_layer="layer4"):
         super().__init__()
         self.backbone = backbone
+        self.attach_layer = attach_layer
+        # prototype dimension must match the attached layer's channels
+        in_channels = self.backbone.LAYER_FACTS[attach_layer]["channels"]
         self.concept_bank = ConceptBank(
-            in_channels=512,  # matches ResNet1D layer4 output channels
+            in_channels=in_channels,
             num_concepts=num_concepts,
             num_classes=num_classes,
         )
@@ -298,7 +302,8 @@ class HMACDModel(nn.Module):
             sim:    [B, K, L]         similarity map
             features: [B, C, L]       (only if return_features=True)
         """
-        features, _ = self.backbone(x, return_features=True)
+        features, _ = self.backbone(x, return_features=True,
+                                    attach_layer=self.attach_layer)
         logits, z, sim = self.concept_bank(features)
 
         if intervene_concepts is not None:

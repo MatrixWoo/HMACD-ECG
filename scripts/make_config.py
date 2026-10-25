@@ -61,6 +61,11 @@ def main():
     parser.add_argument("--segment-m", type=int, default=None,
                         help="Number of contiguous segments for --arm segment "
                              "(default 4).")
+    parser.add_argument("--attach-layer", type=str, default=None,
+                        choices=["layer1", "layer2", "layer3", "layer4"],
+                        help="Which backbone layer the concept bank attaches "
+                             "to (RF: l1 0.43s / l2 0.99s / l3 2.11s / "
+                             "l4 4.35s).")
     parser.add_argument("--lambda-diverse", type=float, default=None)
     parser.add_argument("--lambda-compact", type=float, default=None)
     parser.add_argument("--lambda-decor", type=float, default=None)
@@ -87,6 +92,7 @@ def main():
     set_if(["model", "arm"], args.arm)
     set_if(["model", "arm_positions"], args.arm_positions)
     set_if(["model", "segment_m"], args.segment_m)
+    set_if(["model", "attach_layer"], args.attach_layer)
     set_if(["training", "lambda_diverse"], args.lambda_diverse)
     set_if(["training", "lambda_compact"], args.lambda_compact)
     set_if(["training", "lambda_decor"], args.lambda_decor)
